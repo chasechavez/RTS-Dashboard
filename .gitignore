@@ -21,8 +21,10 @@ ENV/
 
 # Data — keep folder structure, exclude real athlete data
 data/raw/*.csv
-data/processed/
 !data/raw/sample_data.csv
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
 
 # Assets — base64 temp files
 assets/_b64*.txt
