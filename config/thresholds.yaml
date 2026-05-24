@@ -1,0 +1,14 @@
+asymmetry:
+  flag: 15.0       # red  — clinically significant, action required
+  warning: 10.0    # amber — monitor closely
+
+# Populate after Year 1 data collection (used for position benchmark lines)
+# position_norms:
+#   midfielder:
+#     hip_abd_n_per_kg: { p25: 2.8, p50: 3.2, p75: 3.7 }
+#   forward:
+#     hip_abd_n_per_kg: { p25: 2.6, p50: 3.0, p75: 3.5 }
+#   defender:
+#     hip_abd_n_per_kg: { p25: 3.0, p50: 3.4, p75: 3.9 }
+#   goalkeeper:
+#     hip_abd_n_per_kg: { p25: 2.5, p50: 2.9, p75: 3.4 }
