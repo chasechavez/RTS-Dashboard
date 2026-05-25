@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -215,10 +216,13 @@ hr { border-color: var(--cc-card-border, #E5E7EB) !important; }
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
+_DATA_RAW = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "raw")
+
+
 @st.cache_data(ttl=30)
 def get_file_data():
     """Cache raw CSV load only — processing uses live thresholds from session state."""
-    return load_isometric_data("data/raw/")
+    return load_isometric_data(_DATA_RAW)
 
 
 file_df, load_errors = get_file_data()
