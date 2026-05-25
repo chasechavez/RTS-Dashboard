@@ -134,8 +134,8 @@ def render_roster_overview(
         if fig_d_add.data:
             st.plotly_chart(fig_d_add, use_container_width=True)
 
-    # ── Risk matrix ───────────────────────────────────────────────────────────
-    st.subheader("Risk Matrix — Strength vs Asymmetry")
+    # ── Risk matrix + Asymmetry rankings ─────────────────────────────────────
+    st.subheader("Risk Matrix - Strength vs Asymmetry")
     st.caption(
         "X = avg torque (Nm/kg). Y = highest asymmetry (ABD or ADD). "
         "Bubble = body weight. Top-left = highest intervention priority."
@@ -147,10 +147,7 @@ def render_roster_overview(
     else:
         st.caption("Need Nm/kg + asymmetry data for risk matrix.")
 
-    st.divider()
-
-    # ── Asymmetry ranking ─────────────────────────────────────────────────────
-    st.subheader("Asymmetry Index — All Athletes")
+    st.subheader("Asymmetry Index - All Athletes")
     ac1, ac2 = st.columns(2)
     with ac1:
         fig_a_abd = team_asymmetry_rank(df_team, "abd", dark_mode=dark_mode,

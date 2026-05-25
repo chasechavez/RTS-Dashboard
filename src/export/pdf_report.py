@@ -150,10 +150,6 @@ def _add_chart(pdf: FPDF, fig, caption: str = ""):
 
 def _kpi_table(pdf: FPDF, mov: str, label: str, latest: pd.Series):
     """Render a metric summary table + asymmetry status bar for one movement."""
-    l_n   = latest.get(f"hip_{mov}_left_n",         np.nan)
-    r_n   = latest.get(f"hip_{mov}_right_n",        np.nan)
-    l_rel = latest.get(f"hip_{mov}_left_n_per_kg",  np.nan)
-    r_rel = latest.get(f"hip_{mov}_right_n_per_kg", np.nan)
     l_nm  = latest.get(f"hip_{mov}_left_nm_per_kg", np.nan)
     r_nm  = latest.get(f"hip_{mov}_right_nm_per_kg",np.nan)
     asym  = latest.get(f"hip_{mov}_asym_pct",       np.nan)
@@ -165,12 +161,9 @@ def _kpi_table(pdf: FPDF, mov: str, label: str, latest: pd.Series):
     pdf.ln(1)
 
     rows = [
-        ("Metric",        "Left",             "Right",            "Asymmetry"),
-        ("Force (N)",     _fmt(l_n),           _fmt(r_n),          f"{_fmt(asym)}%"),
-        ("Force (N/kg)",  _fmt(l_rel, ".2f"),  _fmt(r_rel, ".2f"), ""),
+        ("Metric",         "Left",            "Right",           "Asymmetry"),
+        ("Torque (Nm/kg)", _fmt(l_nm, ".2f"), _fmt(r_nm, ".2f"), f"{_fmt(asym)}%"),
     ]
-    if not pd.isna(l_nm):
-        rows.append(("Torque (Nm/kg)", _fmt(l_nm, ".2f"), _fmt(r_nm, ".2f"), ""))
 
     cw = [52, 42, 42, 42]
 
@@ -684,8 +677,6 @@ def _normative_table(pdf: FPDF, df: pd.DataFrame):
     metric_cols = [c for c in (
         "hip_abd_left_nm_per_kg",  "hip_abd_right_nm_per_kg",
         "hip_add_left_nm_per_kg",  "hip_add_right_nm_per_kg",
-        "hip_abd_left_n_per_kg",   "hip_abd_right_n_per_kg",
-        "hip_add_left_n_per_kg",   "hip_add_right_n_per_kg",
         "hip_abd_asym_pct",        "hip_add_asym_pct",
     ) if c in snap.columns and snap[c].notna().any()]
 
@@ -694,10 +685,6 @@ def _normative_table(pdf: FPDF, df: pd.DataFrame):
         "hip_abd_right_nm_per_kg": "ABD Right (Nm/kg)",
         "hip_add_left_nm_per_kg":  "ADD Left (Nm/kg)",
         "hip_add_right_nm_per_kg": "ADD Right (Nm/kg)",
-        "hip_abd_left_n_per_kg":   "ABD Left (N/kg)",
-        "hip_abd_right_n_per_kg":  "ABD Right (N/kg)",
-        "hip_add_left_n_per_kg":   "ADD Left (N/kg)",
-        "hip_add_right_n_per_kg":  "ADD Right (N/kg)",
         "hip_abd_asym_pct":        "ABD Asym (%)",
         "hip_add_asym_pct":        "ADD Asym (%)",
     }
