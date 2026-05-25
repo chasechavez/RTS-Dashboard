@@ -444,7 +444,7 @@ def _pdf_asym_rank(df: pd.DataFrame, mov: str,
     colors = [_FC if v > flag_pct else _WC if v > warn_pct else _LC
               for v in data[col]]
     names  = [n[:22] + "…" if len(n) > 22 else n for n in data["athlete_name"]]
-    h      = max(3.0, len(names) * 0.28)
+    h      = min(max(3.0, len(names) * 0.28), 8.5)
     lbl    = "Abduction" if mov == "abd" else "Adduction"
     fig, ax = plt.subplots(figsize=(9.6, h))
     ax.set_facecolor("#F9F9F9")
@@ -638,6 +638,7 @@ class _TeamReport(FPDF):
     def header(self):
         if self.page_no() == 1:
             return
+        self.set_xy(self.l_margin, 5)
         self.set_font("Helvetica", "I", 8)
         self.set_text_color(*WARM_SLATE)
         self.cell(130, 6, "Team Hip Isometric Strength Report", align="L")
@@ -789,7 +790,7 @@ def generate_team_pdf(df: pd.DataFrame) -> bytes:
     for mov, lbl in (("abd", "Hip Abduction"), ("add", "Hip Adduction")):
         fig = _pdf_team_by_position(df, mov)
         if fig is not None:
-            _add_chart(pdf, fig, f"{lbl} — mean torque per tier")
+            _add_chart(pdf, fig, f"{lbl} - mean torque per tier")
 
     # ── Torque distribution ──────────────────────────────────────────────────
     pdf.add_page()
@@ -797,7 +798,7 @@ def generate_team_pdf(df: pd.DataFrame) -> bytes:
     for mov, lbl in (("abd", "Hip Abduction"), ("add", "Hip Adduction")):
         fig = _pdf_team_dist(df, mov)
         if fig is not None:
-            _add_chart(pdf, fig, f"{lbl} — box plot per tier")
+            _add_chart(pdf, fig, f"{lbl} - box plot per tier")
 
     # ── Asymmetry rankings ───────────────────────────────────────────────────
     pdf.add_page()
@@ -810,7 +811,7 @@ def generate_team_pdf(df: pd.DataFrame) -> bytes:
 
     # ── Risk matrix ──────────────────────────────────────────────────────────
     pdf.add_page()
-    _section_title(pdf, "Risk Matrix — Strength vs Asymmetry")
+    _section_title(pdf, "Risk Matrix - Strength vs Asymmetry")
     pdf.set_font("Helvetica", "", 8)
     pdf.set_text_color(*WARM_SLATE)
     pdf.multi_cell(0, 5,
