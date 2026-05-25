@@ -5,4 +5,4 @@ scipy>=1.11.0
 numpy>=1.24.0
 pyyaml>=6.0.0
 fpdf2>=2.7.9
-kaleido>=0.2.1
+kaleido==0.1.0.post1
