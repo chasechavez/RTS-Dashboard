@@ -390,7 +390,7 @@ def generate_athlete_pdf(
     pdf.set_text_color(0, 0, 0)
     pdf.ln(1)
 
-    fig_abd = torque_bw_chart(adf, "abd")
+    fig_abd = torque_bw_chart(adf, "abd", dark_mode=False)
     if fig_abd.data:
         _add_chart(pdf, fig_abd,
                    "ABD torque / BW (Nm/kg or N/kg). Dotted = linear trend (3+ sessions).")
@@ -407,7 +407,7 @@ def generate_athlete_pdf(
     pdf.set_text_color(0, 0, 0)
     pdf.ln(1)
 
-    fig_add = torque_bw_chart(adf, "add")
+    fig_add = torque_bw_chart(adf, "add", dark_mode=False)
     if fig_add.data:
         _add_chart(pdf, fig_add,
                    "ADD torque / BW (Nm/kg or N/kg). Dotted = linear trend (3+ sessions).")
@@ -586,7 +586,7 @@ def generate_team_pdf(df: pd.DataFrame) -> bytes:
     pdf.add_page()
     _section_title(pdf, "Torque Output by Position Group")
     for mov, lbl in (("abd", "Hip Abduction"), ("add", "Hip Adduction")):
-        fig = team_torque_by_position(df, mov)
+        fig = team_torque_by_position(df, mov, dark_mode=False)
         if fig.data:
             _add_chart(pdf, fig, f"{lbl} — mean torque per tier")
 
@@ -594,7 +594,7 @@ def generate_team_pdf(df: pd.DataFrame) -> bytes:
     pdf.add_page()
     _section_title(pdf, "Torque Distribution by Tier")
     for mov, lbl in (("abd", "Hip Abduction"), ("add", "Hip Adduction")):
-        fig = team_torque_distribution(df, mov)
+        fig = team_torque_distribution(df, mov, dark_mode=False)
         if fig.data:
             _add_chart(pdf, fig, f"{lbl} — box + strip plot per tier")
 
@@ -602,7 +602,7 @@ def generate_team_pdf(df: pd.DataFrame) -> bytes:
     pdf.add_page()
     _section_title(pdf, "Asymmetry Rankings")
     for mov, lbl in (("abd", "Hip Abduction"), ("add", "Hip Adduction")):
-        fig = team_asymmetry_rank(df, mov)
+        fig = team_asymmetry_rank(df, mov, dark_mode=False)
         if fig.data:
             _add_chart(pdf, fig,
                        f"{lbl} asymmetry index. Red = >15% flag. Amber = 10-15% watch.")
@@ -619,7 +619,7 @@ def generate_team_pdf(df: pd.DataFrame) -> bytes:
                    "Top-left quadrant = highest intervention priority.")
     pdf.set_text_color(0, 0, 0)
     pdf.ln(2)
-    fig_risk = team_risk_matrix(df)
+    fig_risk = team_risk_matrix(df, dark_mode=False)
     if fig_risk.data:
         _add_chart(pdf, fig_risk)
 

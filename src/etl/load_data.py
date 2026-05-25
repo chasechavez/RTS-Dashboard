@@ -281,19 +281,7 @@ def load_isometric_data(raw_dir: str) -> Tuple[pd.DataFrame, List[str]]:
 
 
 # ── Body-weight CSV loader ────────────────────────────────────────────────────
-_BW_NAME_ALIASES = [
-    "athlete_name", "player_name", "name", "athlete", "player",
-    "subject", "full_name", "first_last", "last_first", "participant",
-]
-_BW_DATE_ALIASES = [
-    "date", "test_date", "session_date", "testing_date",
-    "assessment_date", "test_day", "session_day", "day", "timestamp",
-]
-_BW_WEIGHT_ALIASES = [
-    "bodyweight_kg", "bw_kg", "body_weight_kg", "weight_kg", "mass_kg",
-    "bodyweight", "body_weight", "bw", "weight", "mass", "body_mass",
-    "bodyweight_lbs", "bw_lbs", "weight_lbs", "body_weight_lbs",
-]
+# Alias lists re-use _ID_ALIASES — no separate constants needed.
 
 
 def load_bodyweight_csv(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
@@ -307,9 +295,9 @@ def load_bodyweight_csv(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     slugs = {_slug(c): c for c in df.columns}
 
     # Map required columns
-    name_col   = next((slugs[a] for a in _BW_NAME_ALIASES if a in slugs), None)
-    date_col   = next((slugs[a] for a in _BW_DATE_ALIASES if a in slugs), None)
-    weight_col = next((slugs[a] for a in _BW_WEIGHT_ALIASES if a in slugs), None)
+    name_col   = next((slugs[a] for a in _ID_ALIASES["athlete_name"]   if a in slugs), None)
+    date_col   = next((slugs[a] for a in _ID_ALIASES["date"]           if a in slugs), None)
+    weight_col = next((slugs[a] for a in _ID_ALIASES["bodyweight_kg"]  if a in slugs), None)
 
     if not name_col:
         errors.append("bodyweight CSV: cannot find athlete name column")
@@ -383,7 +371,7 @@ def load_roster_csv(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     errors: List[str] = []
     slugs = {_slug(c): c for c in df.columns}
 
-    name_col     = next((slugs[a] for a in _BW_NAME_ALIASES          if a in slugs), None)
+    name_col     = next((slugs[a] for a in _ID_ALIASES["athlete_name"] if a in slugs), None)
     id_col       = next((slugs[a] for a in _ID_ALIASES["athlete_id"] if a in slugs), None)
     pos_col      = next((slugs[a] for a in _ROSTER_POS_ALIASES        if a in slugs), None)
     jersey_col   = next((slugs[a] for a in _ROSTER_JERSEY_ALIASES     if a in slugs), None)
@@ -599,67 +587,74 @@ def merge_all_sources(
         bw_names     = bw["athlete_name"].dropna().unique().tolist()
         name_map_bw  = build_name_map(force_names, bw_names, name_match_threshold)
 
-        # Reverse map: bw_canonical → force_name
         force_to_bw: Dict[str, str] = {}
         for fn, (bn, score) in name_map_bw.items():
             if bn is not None:
                 force_to_bw[fn] = bn
             else:
-                warnings.append(
-                    f"BW: no match for '{fn}' (best score {score:.2f})"
-                )
+                warnings.append(f"BW: no match for '{fn}' (best score {score:.2f})")
 
         has_bw_date = "date" in bw.columns and bw["date"].notna().any()
 
         if has_bw_date:
-            # Date-matched merge
+            # Vectorized date-matched merge via merge_asof — O(n log n)
+            out["_bw_name"]  = out["athlete_name"].map(force_to_bw)
+            out["_orig_idx"] = np.arange(len(out))
+
+            bw_merge = (
+                bw[["athlete_name", "date", "bodyweight_kg"]]
+                .rename(columns={"athlete_name": "_bw_name",
+                                 "bodyweight_kg": "_new_bw"})
+                .dropna(subset=["date", "_new_bw"])
+                .sort_values("date")
+            )
+
+            can_merge = out["_bw_name"].notna() & out["date"].notna()
+            to_merge  = out[can_merge].sort_values("date").reset_index(drop=True)
             rows_updated = 0
-            for idx, row in out.iterrows():
-                fn = row.get("athlete_name")
-                fd = row.get("date")
-                if fn not in force_to_bw or pd.isna(fd):
-                    continue
-                bn   = force_to_bw[fn]
-                sub  = bw[bw["athlete_name"] == bn].copy()
-                sub  = sub.dropna(subset=["date"])
-                if sub.empty:
-                    continue
-                # Exact match
-                exact = sub[sub["date"] == fd]
-                if not exact.empty:
-                    out.at[idx, "bodyweight_kg"] = exact.iloc[0]["bodyweight_kg"]
-                    rows_updated += 1
-                else:
-                    # Nearest within tolerance
-                    sub["_diff"] = (sub["date"] - fd).abs()
-                    nearest = sub.sort_values("_diff").iloc[0]
-                    tol = pd.Timedelta(days=bw_date_tolerance_days)
-                    if nearest["_diff"] <= tol:
-                        out.at[idx, "bodyweight_kg"] = nearest["bodyweight_kg"]
-                        rows_updated += 1
+
+            if not to_merge.empty and not bw_merge.empty:
+                merged = pd.merge_asof(
+                    to_merge[["_orig_idx", "date", "_bw_name"]],
+                    bw_merge,
+                    on="date",
+                    by="_bw_name",
+                    tolerance=pd.Timedelta(days=bw_date_tolerance_days),
+                    direction="nearest",
+                )
+                bw_hit = merged["_new_bw"].notna()
+                rows_updated = int(bw_hit.sum())
+                if rows_updated > 0:
+                    update_map = dict(
+                        zip(merged.loc[bw_hit, "_orig_idx"],
+                            merged.loc[bw_hit, "_new_bw"])
+                    )
+                    hit_mask = out["_orig_idx"].isin(update_map)
+                    out.loc[hit_mask, "bodyweight_kg"] = (
+                        out.loc[hit_mask, "_orig_idx"].map(update_map)
+                    )
+
             if rows_updated == 0:
                 warnings.append(
                     "BW merge: no date-matched rows updated. "
                     "Check date formats match between CSVs."
                 )
+            out = out.drop(columns=["_bw_name", "_orig_idx"])
+
         else:
-            # No date column — use single static BW per athlete
+            # No date column — vectorized static BW per athlete
             static_bw: Dict[str, float] = {}
             for fn, bn in force_to_bw.items():
                 sub = bw[bw["athlete_name"] == bn]["bodyweight_kg"].dropna()
                 if not sub.empty:
-                    static_bw[fn] = sub.iloc[-1]  # take last value
+                    static_bw[fn] = float(sub.iloc[-1])
 
-            def _fill_bw(row):
-                if pd.isna(row.get("bodyweight_kg")):
-                    return static_bw.get(row["athlete_name"], row.get("bodyweight_kg"))
-                return row.get("bodyweight_kg")
-
-            out["bodyweight_kg"] = out.apply(_fill_bw, axis=1)
             if static_bw:
-                warnings.append(
-                    "BW CSV has no date column — using static weight per athlete."
+                mapped = out["athlete_name"].map(static_bw)
+                out["bodyweight_kg"] = out["bodyweight_kg"].where(
+                    out["bodyweight_kg"].notna(), mapped
                 )
+                warnings.append("BW CSV has no date column — using static weight per athlete.")
 
     # ── Merge roster ──────────────────────────────────────────────────────────
     if roster_df is not None and not roster_df.empty and "athlete_name" in roster_df.columns:
@@ -668,36 +663,50 @@ def merge_all_sources(
         roster_names  = roster["athlete_name"].dropna().unique().tolist()
         name_map_ros  = build_name_map(force_names, roster_names, name_match_threshold)
 
-        for idx, row in out.iterrows():
-            fn = row.get("athlete_name")
-            matched, score = name_map_ros.get(fn, (None, 0.0))
-            if matched is None:
-                continue
-            r_row = roster[roster["athlete_name"] == matched].iloc[0]
+        force_to_roster: Dict[str, str] = {}
+        for fn, (rn, _score) in name_map_ros.items():
+            if rn is not None:
+                force_to_roster[fn] = rn
 
-            # Position — only fill if missing
-            if "position" not in out.columns or pd.isna(row.get("position")) or str(row.get("position")) in ("UNK", "nan", ""):
-                if "position" in r_row.index and pd.notna(r_row["position"]):
-                    out.at[idx, "position"] = r_row["position"]
-
-            # Jersey number
-            if "jersey_number" not in out.columns or pd.isna(row.get("jersey_number")):
-                if "jersey_number" in r_row.index and pd.notna(r_row["jersey_number"]):
-                    out.at[idx, "jersey_number"] = r_row["jersey_number"]
-
-            # Athlete ID from roster
-            if "athlete_id" not in out.columns or pd.isna(row.get("athlete_id")):
-                if "athlete_id" in r_row.index and pd.notna(r_row["athlete_id"]):
-                    out.at[idx, "athlete_id"] = r_row["athlete_id"]
-
-        # Report unmatched
-        unmatched = [fn for fn, (bn, _) in name_map_ros.items() if bn is None]
+        unmatched = [fn for fn, (rn, _) in name_map_ros.items() if rn is None]
         if unmatched:
             warnings.append(
                 f"Roster: {len(unmatched)} athlete(s) unmatched: "
                 + ", ".join(f"'{n}'" for n in unmatched[:8])
                 + (" …" if len(unmatched) > 8 else "")
             )
+
+        # Vectorized join: map names → roster names, left-join, fill gaps
+        out["_roster_name"] = out["athlete_name"].map(force_to_roster)
+
+        fill_cols = [c for c in ("position", "jersey_number", "athlete_id",
+                                 "height_cm", "height_raw", "eligibility", "hometown")
+                     if c in roster.columns]
+        roster_slim = (
+            roster
+            .rename(columns={"athlete_name": "_roster_name"})
+            .drop_duplicates(subset=["_roster_name"])
+            [["_roster_name"] + fill_cols]
+        )
+
+        merged_ros = out.merge(roster_slim, on="_roster_name", how="left",
+                               suffixes=("", "_r"))
+
+        for col in fill_cols:
+            r_col = f"{col}_r"
+            if r_col not in merged_ros.columns:
+                continue
+            if col in merged_ros.columns:
+                needs_fill = (
+                    merged_ros[col].isna() |
+                    merged_ros[col].astype(str).isin({"UNK", "nan", ""})
+                )
+                merged_ros.loc[needs_fill, col] = merged_ros.loc[needs_fill, r_col]
+            else:
+                merged_ros[col] = merged_ros[r_col]
+            merged_ros = merged_ros.drop(columns=[r_col])
+
+        out = merged_ros.drop(columns=["_roster_name"])
 
     # ── Ensure position fallback ──────────────────────────────────────────────
     if "position" not in out.columns:

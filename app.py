@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from src.config import load_asym_thresholds
 from src.etl.load_data import (
     load_isometric_data,
     load_bodyweight_csv,
@@ -11,18 +12,10 @@ from src.etl.load_data import (
 )
 from src.etl.detect_csv_type import detect_csv_type
 from src.etl.process_isometric import process_metrics, POSITION_TIERS
-import src.viz.isometric_plots as _iso_mod
-from src.viz.isometric_plots import (
-    asymmetry_chart,
-    athlete_vs_team_chart,
-    percentile_strip_chart,
-    zscore_benchmark_chart,
-    team_torque_by_position,
-    team_asymmetry_rank,
-    team_torque_distribution,
-    team_risk_matrix,
-    torque_bw_chart,
-)
+from src.ui.athlete_profile import render_athlete_profile
+from src.ui.roster_overview import render_roster_overview
+
+_THRESH = load_asym_thresholds()
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -220,71 +213,12 @@ hr { border-color: var(--cc-card-border, #E5E7EB) !important; }
 """, unsafe_allow_html=True)
 
 
-# ── Column display labels ─────────────────────────────────────────────────────
-_COL_LABELS = {
-    "date":                   "Date",
-    "athlete_id":             "Athlete ID",
-    "athlete_name":           "Athlete",
-    "position":               "Position",
-    "tier":                   "Tier",
-    "jersey_number":          "Jersey #",
-    "bodyweight_kg":          "Bodyweight (kg)",
-    "hip_abd_left_n":         "Hip ABD Left (N)",
-    "hip_abd_right_n":        "Hip ABD Right (N)",
-    "hip_abd_left_n_per_kg":  "ABD Left (N/kg)",
-    "hip_abd_right_n_per_kg": "ABD Right (N/kg)",
-    "hip_abd_left_nm_per_kg": "ABD Left (Nm/kg)",
-    "hip_abd_right_nm_per_kg":"ABD Right (Nm/kg)",
-    "hip_abd_asym_pct":       "ABD Asym (%)",
-    "hip_abd_asym_flag":      "ABD Flag",
-    "hip_add_left_n":         "Hip ADD Left (N)",
-    "hip_add_right_n":        "Hip ADD Right (N)",
-    "hip_add_left_n_per_kg":  "ADD Left (N/kg)",
-    "hip_add_right_n_per_kg": "ADD Right (N/kg)",
-    "hip_add_left_nm_per_kg": "ADD Left (Nm/kg)",
-    "hip_add_right_nm_per_kg":"ADD Right (Nm/kg)",
-    "hip_add_asym_pct":       "ADD Asym (%)",
-    "hip_add_asym_flag":      "ADD Flag",
-    "dominant":               "Dominant Side",
-}
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def _fmt(val, spec=".1f", fallback="-"):
-    try:
-        return fallback if pd.isna(val) else f"{val:{spec}}"
-    except Exception:
-        return fallback
-
-
-def _delta(latest: pd.Series, prev, col: str, spec="+.1f"):
-    if prev is None or col not in latest.index:
-        return None
-    try:
-        d = float(latest[col]) - float(prev[col])
-        return f"{d:{spec}}"
-    except Exception:
-        return None
-
-
-def _jersey_str(latest: pd.Series) -> str:
-    """Return '#NN  ·  ' prefix if jersey number present, else empty string."""
-    raw = latest.get("jersey_number", latest.get("jersey", None))
-    if raw is None:
-        return ""
-    try:
-        return f"#{int(float(raw))}&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
-    except (TypeError, ValueError):
-        return ""
-
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=30)
 def get_file_data():
-    raw, errors = load_isometric_data("data/raw/")
-    if raw.empty:
-        return raw, errors
-    return process_metrics(raw), errors
+    """Cache raw CSV load only — processing uses live thresholds from session state."""
+    return load_isometric_data("data/raw/")
 
 
 file_df, load_errors = get_file_data()
@@ -292,7 +226,9 @@ file_df, load_errors = get_file_data()
 
 def _build_df() -> pd.DataFrame:
     """Combine file-based + uploaded force CSVs, then fuse BW and roster."""
-    # Gather all force DataFrames
+    # Read current thresholds (set by sidebar sliders; defaults on first run)
+    flag_pct = float(st.session_state.get("flag_pct", _THRESH["flag"]))
+
     force_dfs = [d for d in ([file_df] + st.session_state.get("ss_force_dfs", []))
                  if d is not None and not d.empty]
 
@@ -307,16 +243,14 @@ def _build_df() -> pd.DataFrame:
                 .sort_values(["athlete_name", "date"])
                 .reset_index(drop=True))
 
-    # Fuse bodyweight + roster
     bw_df     = st.session_state.get("ss_bw_df")
     roster_df = st.session_state.get("ss_roster_df")
 
     merged, warn = merge_all_sources(combined, bw_df, roster_df)
     st.session_state["ss_merge_warnings"] = warn
 
-    result = process_metrics(merged)
+    result = process_metrics(merged, flag_pct=flag_pct)
 
-    # Apply manual position → tier overrides
     overrides: dict = st.session_state.get("ss_pos_tier_override", {})
     if overrides and "position" in result.columns:
         def _tier(pos):
@@ -369,6 +303,22 @@ with st.sidebar:
         help="Switch chart backgrounds between dark and light",
     )
     st.session_state["dark_mode"] = _dark
+
+    # ── Asymmetry thresholds ──────────────────────────────────────────────────
+    with st.expander("⚙️ Thresholds", expanded=False):
+        st.caption("Customise asymmetry flag / warning levels.")
+        st.slider(
+            "Flag threshold (%)", min_value=5.0, max_value=30.0, step=0.5,
+            value=float(st.session_state.get("flag_pct", _THRESH["flag"])),
+            key="flag_pct",
+            help="Asymmetry above this % triggers a red flag",
+        )
+        st.slider(
+            "Warning threshold (%)", min_value=5.0, max_value=25.0, step=0.5,
+            value=float(st.session_state.get("warn_pct", _THRESH["warning"])),
+            key="warn_pct",
+            help="Asymmetry above this % triggers an amber warning",
+        )
 
     st.divider()
 
@@ -552,7 +502,11 @@ with st.sidebar:
 
     names    = sorted(pos_pool["athlete_name"].unique())
     sel_name = st.selectbox("Athlete", names)
-    sel_id   = df[df["athlete_name"] == sel_name]["athlete_id"].iloc[0]
+    _id_s    = df[df["athlete_name"] == sel_name]["athlete_id"]
+    if _id_s.empty:
+        st.error(f"No data for '{sel_name}'. Select a different athlete.")
+        st.stop()
+    sel_id = _id_s.iloc[0]
 
 
 # ── Athlete-scoped data (defined BEFORE second sidebar block) ─────────────────
@@ -616,155 +570,6 @@ with st.sidebar:
         st.caption("Re-generate after switching athlete")
 
 
-# ── Movement section helper ───────────────────────────────────────────────────
-def _movement_section(mov: str, label: str):
-    st.subheader(label)
-
-    l_n   = latest.get(f"hip_{mov}_left_n",          np.nan)
-    r_n   = latest.get(f"hip_{mov}_right_n",         np.nan)
-    l_rel = latest.get(f"hip_{mov}_left_n_per_kg",   np.nan)
-    r_rel = latest.get(f"hip_{mov}_right_n_per_kg",  np.nan)
-    l_nm  = latest.get(f"hip_{mov}_left_nm_per_kg",  np.nan)
-    r_nm  = latest.get(f"hip_{mov}_right_nm_per_kg", np.nan)
-    asym  = latest.get(f"hip_{mov}_asym_pct",        np.nan)
-    flag  = latest.get(f"hip_{mov}_asym_flag",       False)
-
-    try:
-        asym_f = float(asym)
-    except (TypeError, ValueError):
-        asym_f = None
-
-    # ── N → lb conversion ────────────────────────────────────────────────────
-    def _lb(n_val):
-        try:
-            return _fmt(float(n_val) * 0.224809, ".1f")
-        except Exception:
-            return "-"
-
-    # ── Inline delta chip (for HTML card) ────────────────────────────────────
-    def _dchip(col, inverse=False):
-        d = _delta(latest, prev, col)
-        if d is None:
-            return ""
-        try:
-            fval = float(d)
-        except (TypeError, ValueError):
-            return ""
-        better = fval <= 0 if inverse else fval >= 0
-        color  = "#22C55E" if better else "#EF4444"
-        sign   = "+" if fval >= 0 else ""
-        return (f'<span style="font-size:0.62rem; color:{color}; '
-                f'margin-left:5px; opacity:0.85;">{sign}{fval:.1f}</span>')
-
-    # ── Asymmetry badge colours ───────────────────────────────────────────────
-    if flag or (asym_f is not None and asym_f > 15):
-        ac, abg, abdr = "#EF4444", "rgba(239,68,68,0.15)",  "#EF444450"
-    elif asym_f is not None and asym_f > 10:
-        ac, abg, abdr = "#FFB400", "rgba(255,180,0,0.15)",  "#FFB40050"
-    else:
-        ac, abg, abdr = "#22C55E", "rgba(34,197,94,0.12)",  "#22C55E50"
-
-    # ── Table row builder ─────────────────────────────────────────────────────
-    def _row(metric, l_val, r_val, l_sub="", r_sub="",
-             col_l=None, col_r=None, inverse=False):
-        ld = _dchip(col_l, inverse) if col_l else ""
-        rd = _dchip(col_r, inverse) if col_r else ""
-        ls = (f'<br><span style="font-size:0.68rem; color:var(--cc-sub-text);">'
-              f'{l_sub}</span>') if l_sub else ""
-        rs = (f'<br><span style="font-size:0.68rem; color:var(--cc-sub-text);">'
-              f'{r_sub}</span>') if r_sub else ""
-        return f"""
-<tr style="border-top:1px dashed var(--cc-row-sep);">
-  <td style="color:var(--cc-label-dim); font-size:0.75rem; padding:8px 0;
-             font-family:Arial,sans-serif; white-space:nowrap;">{metric}</td>
-  <td style="color:#00A3A3; font-size:0.92rem; font-weight:700;
-             text-align:right; padding:8px 16px 8px 0;
-             font-family:'Courier New',monospace; line-height:1.4;"
-  >{l_val}{ls}{ld}</td>
-  <td style="color:var(--cc-right-val); font-size:0.92rem; font-weight:700;
-             text-align:right; padding:8px 0;
-             font-family:'Courier New',monospace; line-height:1.4;"
-  >{r_val}{rs}{rd}</td>
-</tr>"""
-
-    rows = _row(
-        "Force",
-        f"{_fmt(l_n)} N", f"{_fmt(r_n)} N",
-        l_sub=f"{_lb(l_n)} lb", r_sub=f"{_lb(r_n)} lb",
-        col_l=f"hip_{mov}_left_n", col_r=f"hip_{mov}_right_n",
-    )
-    rows += _row(
-        "Force / BW",
-        f"{_fmt(l_rel, '.2f')} N/kg", f"{_fmt(r_rel, '.2f')} N/kg",
-        col_l=f"hip_{mov}_left_n_per_kg", col_r=f"hip_{mov}_right_n_per_kg",
-    )
-    has_torque = f"hip_{mov}_left_nm_per_kg" in adf.columns
-    if has_torque:
-        rows += _row(
-            "Torque / BW",
-            f"{_fmt(l_nm, '.2f')} Nm/kg", f"{_fmt(r_nm, '.2f')} Nm/kg",
-            col_l=f"hip_{mov}_left_nm_per_kg", col_r=f"hip_{mov}_right_nm_per_kg",
-        )
-
-    asym_dchip = _dchip(f"hip_{mov}_asym_pct", inverse=True)
-    lbl_upper  = "ABDUCTION" if mov == "abd" else "ADDUCTION"
-
-    st.markdown(f"""
-<div style="background:var(--cc-card-bg); border-radius:10px;
-            padding:14px 18px 12px 18px; margin-bottom:0.7rem;
-            border:1px solid var(--cc-card-border);">
-  <div style="display:flex; justify-content:space-between; align-items:center;
-              margin-bottom:10px; padding-bottom:8px;
-              border-bottom:1px dashed var(--cc-row-sep);">
-    <span style="color:var(--cc-label-dim); font-size:0.65rem; letter-spacing:1.8px;
-                 text-transform:uppercase; font-family:Arial,sans-serif;">
-      HIP {lbl_upper}
-    </span>
-    <span style="background:{abg}; color:{ac};
-                 font-family:'Courier New',monospace; font-size:0.8rem;
-                 font-weight:700; padding:3px 10px; border-radius:4px;
-                 border:1px solid {abdr};">
-      ASYM {_fmt(asym)}%{asym_dchip}
-    </span>
-  </div>
-  <table style="width:100%; border-collapse:collapse;">
-    <thead>
-      <tr>
-        <th style="color:var(--cc-th-metric); font-size:0.62rem; font-weight:500;
-                   text-align:left; padding:0 0 5px 0; letter-spacing:1px;
-                   font-family:Arial,sans-serif; width:26%;">METRIC</th>
-        <th style="color:var(--cc-th-left,#00A3A3); font-size:0.62rem; font-weight:500;
-                   text-align:right; padding:0 16px 5px 0; letter-spacing:1px;
-                   font-family:Arial,sans-serif;">LEFT</th>
-        <th style="color:var(--cc-th-right); font-size:0.62rem; font-weight:500;
-                   text-align:right; padding:0 0 5px 0; letter-spacing:1px;
-                   font-family:Arial,sans-serif;">RIGHT</th>
-      </tr>
-    </thead>
-    <tbody>{rows}</tbody>
-  </table>
-</div>
-""", unsafe_allow_html=True)
-
-    # ── Asymmetry status banner ───────────────────────────────────────────────
-    if flag:
-        st.error(
-            f"ASYMMETRY FLAG — {_fmt(asym)}% exceeds 15% clinical threshold. "
-            "Review recommended."
-        )
-    elif asym_f is not None and asym_f > 10:
-        st.warning(
-            f"MONITOR — {_fmt(asym)}% asymmetry above 10% warning level. "
-            "Track closely."
-        )
-    else:
-        st.success(f"Symmetry within normal range ({_fmt(asym)}%).")
-
-
-
-# ── Apply chart theme ────────────────────────────────────────────────────────
-_iso_mod.DARK_MODE = st.session_state.get("dark_mode", True)
-
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_profile, tab_roster = st.tabs(["📊 Athlete Profile", "👥 Roster Overview"])
 
@@ -772,314 +577,24 @@ tab_profile, tab_roster = st.tabs(["📊 Athlete Profile", "👥 Roster Overview
 # ATHLETE PROFILE
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_profile:
-
-    # ── Branded athlete header ───────────────────────────────────────────────
-    pos_str  = str(latest.get("position", "-"))
-    tier_str = str(latest.get("tier", "-")) if "tier" in latest.index else "-"
-    bw_kg_val = latest.get("bodyweight_kg", np.nan)
-    bw_str   = _fmt(bw_kg_val, ".1f")
-    try:
-        bw_lbs_str = _fmt(float(bw_kg_val) * 2.20462, ".1f")
-    except Exception:
-        bw_lbs_str = "-"
-    bw_display = f"{bw_str} kg / {bw_lbs_str} lbs" if bw_str != "-" else "-"
-    date_str = pd.to_datetime(latest["date"]).strftime("%d %b %Y")
-    ns       = len(adf)
-    jsy      = _jersey_str(latest)
-
-    st.markdown(f"""
-<div style="
-    background: #005F87;
-    border-radius: 10px;
-    padding: 20px 24px 16px 24px;
-    margin-bottom: 1.4rem;
-">
-  <div style="
-      font-size: 1.75rem;
-      font-weight: 700;
-      color: #FFFFFF;
-      font-family: Arial, Helvetica, sans-serif;
-      letter-spacing: -0.3px;
-      line-height: 1.2;
-      margin-bottom: 6px;
-  ">{sel_name}</div>
-  <div style="
-      font-size: 1.08rem;
-      font-weight: 600;
-      color: #00A3A3;
-      font-family: 'Courier New', Courier, monospace;
-      letter-spacing: 0.05em;
-      margin-bottom: 2px;
-  ">{jsy}{pos_str}&nbsp;&nbsp;&middot;&nbsp;&nbsp;{tier_str}&nbsp;&nbsp;&middot;&nbsp;&nbsp;{bw_display}</div>
-  <div style="
-      border-top: 1px solid rgba(255,255,255,0.18);
-      margin-top: 14px;
-      padding-top: 11px;
-      display: flex;
-      gap: 2.8rem;
-      flex-wrap: wrap;
-  ">
-    <span style="color:#C5DBE8; font-size:0.95rem; font-family:Arial,sans-serif;">
-      Latest Test:&nbsp;<b style="color:#00A3A3; font-size:1rem;">{date_str}</b>
-    </span>
-    <span style="color:#C5DBE8; font-size:0.95rem; font-family:Arial,sans-serif;">
-      Total Sessions:&nbsp;<b style="color:#00A3A3; font-size:1rem;">{ns}</b>
-    </span>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-    # ── Body weight staleness warning ────────────────────────────────────────
-    bw_vals = adf["bodyweight_kg"].dropna()
-    if len(bw_vals) > 1 and bw_vals.nunique() == 1:
-        st.warning(
-            "Body weight is identical across all sessions. "
-            "Verify athletes are weighed at each test — static BW produces "
-            "inaccurate torque normalisation."
-        )
-
-    _mov_col1, _mov_col2 = st.columns(2)
-    with _mov_col1:
-        _movement_section("abd", "Hip Abduction")
-    with _mov_col2:
-        _movement_section("add", "Hip Adduction")
-
-    st.divider()
-    st.subheader("Force / Torque Trends")
-    _tc1, _tc2 = st.columns(2)
-    with _tc1:
-        _fig_abd = torque_bw_chart(adf, "abd")
-        if _fig_abd.data:
-            st.plotly_chart(_fig_abd, use_container_width=True)
-        else:
-            st.caption("ABD trend unavailable — check bodyweight recorded.")
-    with _tc2:
-        _fig_add = torque_bw_chart(adf, "add")
-        if _fig_add.data:
-            st.plotly_chart(_fig_add, use_container_width=True)
-        else:
-            st.caption("ADD trend unavailable — check bodyweight recorded.")
-
-    st.divider()
-    st.subheader("Asymmetry Over Time")
-    st.plotly_chart(asymmetry_chart(adf), use_container_width=True)
-
-    st.divider()
-    st.subheader("Position Benchmarks")
-
-    # Z-score: all metrics vs positional cohort (full width)
-    zfig = zscore_benchmark_chart(df, sel_id)
-    if zfig.data:
-        st.plotly_chart(zfig, use_container_width=True)
-    else:
-        st.caption("Z-score chart requires 3+ athletes in the same position.")
-
-    # Percentile strips: one per movement (side by side)
-    pc1, pc2 = st.columns(2)
-    with pc1:
-        pfig_abd = percentile_strip_chart(df, sel_id, "abd")
-        if pfig_abd.data:
-            st.plotly_chart(pfig_abd, use_container_width=True)
-        else:
-            st.caption("Percentile strip requires 3+ athletes in position (ABD).")
-    with pc2:
-        pfig_add = percentile_strip_chart(df, sel_id, "add")
-        if pfig_add.data:
-            st.plotly_chart(pfig_add, use_container_width=True)
-        else:
-            st.caption("Percentile strip requires 3+ athletes in position (ADD).")
-
-    with st.expander("Raw Data"):
-        display_df = (
-            adf.sort_values("date", ascending=False)
-            .reset_index(drop=True)
-            .rename(columns={c: _COL_LABELS.get(c, c) for c in adf.columns})
-        )
-        st.dataframe(display_df, use_container_width=True)
+    _dark_mode = st.session_state.get("dark_mode", True)
+    _flag_pct  = float(st.session_state.get("flag_pct", _THRESH["flag"]))
+    _warn_pct  = float(st.session_state.get("warn_pct", _THRESH["warning"]))
+    render_athlete_profile(
+        df, adf, sel_id, sel_name, latest, prev,
+        dark_mode=_dark_mode, flag_pct=_flag_pct, warn_pct=_warn_pct,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ROSTER OVERVIEW
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_roster:
-
-    # ── Latest snapshot per athlete ───────────────────────────────────────────
-    roster     = df.sort_values("date").groupby("athlete_id").last().reset_index()
-    now        = pd.Timestamp.now()
-    tested_14d = int((roster["date"] >= now - pd.Timedelta(days=14)).sum())
-    abd_flags  = int(roster.get("hip_abd_asym_flag", pd.Series(dtype=bool)).sum())
-    add_flags  = int(roster.get("hip_add_asym_flag", pd.Series(dtype=bool)).sum())
-
-    abd_warn = int(
-        ((roster.get("hip_abd_asym_pct", pd.Series(dtype=float)) > 10) &
-         (roster.get("hip_abd_asym_pct", pd.Series(dtype=float)) <= 15)).sum()
-    )
-    add_warn = int(
-        ((roster.get("hip_add_asym_pct", pd.Series(dtype=float)) > 10) &
-         (roster.get("hip_add_asym_pct", pd.Series(dtype=float)) <= 15)).sum()
-    )
-
-    # ── Athlete vs Team comparison ────────────────────────────────────────────
-    st.subheader("Athlete vs Team")
-    cmp_names = sorted(roster["athlete_name"].dropna().unique())
-    cmp_sel   = st.selectbox("Search athlete", cmp_names, key="roster_compare",
-                              help="Compare one athlete's metrics against full team distribution")
-    cmp_id    = df[df["athlete_name"] == cmp_sel]["athlete_id"].iloc[0]
-    fig_cmp   = athlete_vs_team_chart(df, cmp_id)
-    if fig_cmp.data:
-        st.caption(
-            "Bar = team min–max · Dark box = IQR · Tick = team median · "
-            "Diamond = selected athlete. Asym diamonds: teal ≤10 % · amber 10–15 % · red >15 %"
-        )
-        st.plotly_chart(fig_cmp, use_container_width=True)
-    else:
-        st.caption("Need N/kg data to compare. Verify bodyweight is recorded.")
-
-    st.divider()
-
-    # ── Tier / position filter (applies to charts + table) ───────────────────
-    rf1, rf2 = st.columns([1, 5])
-    with rf1:
-        roster_tier = st.selectbox("Filter tier",
-                                   ["All", "Skill", "Mid", "Big"],
-                                   key="roster_tier")
-    df_team  = df if roster_tier == "All" else (
-        df[df["tier"] == roster_tier] if "tier" in df.columns else df
-    )
-    roster_v = roster if roster_tier == "All" else (
-        roster[roster["tier"] == roster_tier] if "tier" in roster.columns else roster
-    )
-
-    # ── Summary KPIs ─────────────────────────────────────────────────────────
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("Athletes",         len(roster_v))
-    k2.metric("Tested (14 d)",    tested_14d)
-    k3.metric("ABD Flag (>15%)",  abd_flags,  delta=None)
-    k4.metric("ABD Warn (10-15%)",abd_warn)
-    k5.metric("ADD Flag (>15%)",  add_flags)
-    k6.metric("ADD Warn (10-15%)",add_warn)
-
-    st.divider()
-
-    # ── SECTION 1: Torque output by position tier ─────────────────────────────
-    st.subheader("Torque Output by Position Group")
-    tc1, tc2 = st.columns(2)
-    with tc1:
-        fig_t_abd = team_torque_by_position(df_team, "abd")
-        if fig_t_abd.data:
-            st.plotly_chart(fig_t_abd, use_container_width=True)
-        else:
-            st.caption("Need tier data + Nm/kg for this chart.")
-    with tc2:
-        fig_t_add = team_torque_by_position(df_team, "add")
-        if fig_t_add.data:
-            st.plotly_chart(fig_t_add, use_container_width=True)
-        else:
-            st.caption("Need tier data + Nm/kg for this chart.")
-
-    # ── SECTION 2: Torque distribution (strip + box per tier) ─────────────────
-    st.subheader("Torque Distribution by Tier")
-    td1, td2 = st.columns(2)
-    with td1:
-        fig_d_abd = team_torque_distribution(df_team, "abd")
-        if fig_d_abd.data:
-            st.plotly_chart(fig_d_abd, use_container_width=True)
-    with td2:
-        fig_d_add = team_torque_distribution(df_team, "add")
-        if fig_d_add.data:
-            st.plotly_chart(fig_d_add, use_container_width=True)
-
-    # ── SECTION 3: Risk matrix ────────────────────────────────────────────────
-    st.subheader("Risk Matrix — Strength vs Asymmetry")
-    st.caption(
-        "X = avg torque across all movements (Nm/kg). "
-        "Y = highest asymmetry across ABD + ADD. "
-        "Bubble size = body weight. "
-        "Top-left quadrant (low strength + high asym) = highest intervention priority."
-    )
-    fig_risk = team_risk_matrix(df_team)
-    if fig_risk.data:
-        st.plotly_chart(fig_risk, use_container_width=True)
-    else:
-        st.caption("Need Nm/kg + asymmetry data for risk matrix.")
-
-    st.divider()
-
-    # ── SECTION 4: Asymmetry ranking ─────────────────────────────────────────
-    st.subheader("Asymmetry Index — All Athletes")
-    ac1, ac2 = st.columns(2)
-    with ac1:
-        fig_a_abd = team_asymmetry_rank(df_team, "abd")
-        if fig_a_abd.data:
-            st.plotly_chart(fig_a_abd, use_container_width=True)
-        else:
-            st.caption("No ABD asymmetry data.")
-    with ac2:
-        fig_a_add = team_asymmetry_rank(df_team, "add")
-        if fig_a_add.data:
-            st.plotly_chart(fig_a_add, use_container_width=True)
-        else:
-            st.caption("No ADD asymmetry data.")
-
-    st.divider()
-
-    # ── SECTION 5: Full roster table ─────────────────────────────────────────
-    st.subheader("Full Roster — Latest Values")
-
-    # Build a display copy with BW as "X.X kg / Y.Y lbs" string
-    roster_v_display = roster_v.copy()
-    if "bodyweight_kg" in roster_v_display.columns:
-        roster_v_display["bodyweight_display"] = roster_v_display["bodyweight_kg"].apply(
-            lambda v: f"{v:.1f} kg / {v * 2.20462:.1f} lbs"
-            if pd.notna(v) else "-"
-        )
-
-    show_cols = [c for c in (
-        "athlete_name", "position", "tier", "date",
-        "bodyweight_display",
-        "hip_abd_left_nm_per_kg", "hip_abd_right_nm_per_kg", "hip_abd_asym_pct",
-        "hip_abd_asym_flag",
-        "hip_add_left_nm_per_kg", "hip_add_right_nm_per_kg", "hip_add_asym_pct",
-        "hip_add_asym_flag",
-    ) if c in roster_v_display.columns]
-
-    flag_cols_orig = [c for c in (
-        "hip_abd_asym_pct", "hip_add_asym_pct",
-        "hip_abd_asym_flag", "hip_add_asym_flag",
-    ) if c in roster_v_display.columns]
-
-    _COL_LABELS_DISPLAY = {**_COL_LABELS, "bodyweight_display": "Bodyweight"}
-    col_map           = {c: _COL_LABELS_DISPLAY.get(c, c) for c in show_cols}
-    _sort_col = "hip_abd_asym_pct" if "hip_abd_asym_pct" in roster_v_display.columns else show_cols[0]
-    roster_display    = (
-        roster_v_display[show_cols]
-        .sort_values(_sort_col, ascending=False)
-        .rename(columns=col_map)
-    )
-    flag_cols_display = [col_map.get(c, c) for c in flag_cols_orig]
-
-    # Numeric columns to format to 1 decimal (exclude text/date/bool/pre-formatted)
-    _skip = {"athlete_name", "position", "tier", "date",
-             "hip_abd_asym_flag", "hip_add_asym_flag", "bodyweight_display"}
-    num_display_cols = [col_map[c] for c in show_cols
-                        if c not in _skip and col_map[c] in roster_display.columns]
-
-    def _color_cell(val):
-        if isinstance(val, (bool, np.bool_)) and val:
-            return "background-color: #fee2e2; color: #b91c1c"
-        if isinstance(val, float):
-            if val > 15:
-                return "background-color: #fee2e2; color: #b91c1c"
-            if val > 10:
-                return "background-color: #fff3c3; color: #b46e00"
-        return ""
-
-    styled = (
-        roster_display.style
-        .map(_color_cell, subset=flag_cols_display)
-        .format("{:.1f}", subset=num_display_cols, na_rep="-")
-    )
-    st.dataframe(styled, use_container_width=True, height=520)
+    _dark_mode = st.session_state.get("dark_mode", True)
+    _flag_pct  = float(st.session_state.get("flag_pct", _THRESH["flag"]))
+    _warn_pct  = float(st.session_state.get("warn_pct", _THRESH["warning"]))
+    render_roster_overview(df, dark_mode=_dark_mode,
+                           flag_pct=_flag_pct, warn_pct=_warn_pct)
 
 # ── Branded footer ────────────────────────────────────────────────────────────
 st.markdown("""
