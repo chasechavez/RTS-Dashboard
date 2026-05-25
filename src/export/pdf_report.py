@@ -5,13 +5,9 @@ import numpy as np
 import pandas as pd
 from fpdf import FPDF
 
-from src.viz.isometric_plots import (
-    torque_bw_chart,
-    team_torque_by_position,
-    team_torque_distribution,
-    team_asymmetry_rank,
-    team_risk_matrix,
-)
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 # ── Brand palette (R, G, B) ───────────────────────────────────────────────────
 ATHLETIC_BLUE = (  0,  95, 135)   # #005F87  hub · arms · headlines
@@ -43,9 +39,13 @@ def _safe(text: str) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
-def _fig_png(fig, w: int = 960, h: int = 400) -> bytes:
-    """Render plotly figure to PNG bytes via kaleido."""
-    return fig.to_image(format="png", width=w, height=h, scale=2)
+def _mpl_to_png(fig) -> bytes:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
 
 
 # ── PDF class ─────────────────────────────────────────────────────────────────
@@ -138,7 +138,7 @@ def _draw_node_mark(pdf: FPDF, x0: float, y0: float,
 
 
 def _add_chart(pdf: FPDF, fig, caption: str = ""):
-    img = _fig_png(fig)
+    img = _mpl_to_png(fig)
     pdf.image(io.BytesIO(img), x=14, w=182)
     if caption:
         pdf.set_font("Helvetica", "I", 8)
@@ -146,18 +146,6 @@ def _add_chart(pdf: FPDF, fig, caption: str = ""):
         pdf.cell(0, 5, _safe(caption), ln=True, align="C")
         pdf.set_text_color(0, 0, 0)
     pdf.ln(3)
-
-
-def _add_chart_compact(pdf: FPDF, fig, caption: str = ""):
-    """Half-height chart for multi-chart pages."""
-    img = fig.to_image(format="png", width=960, height=220, scale=2)
-    pdf.image(io.BytesIO(img), x=14, w=182)
-    if caption:
-        pdf.set_font("Helvetica", "I", 7)
-        pdf.set_text_color(*WARM_SLATE)
-        pdf.cell(0, 4, _safe(caption), ln=True, align="C")
-        pdf.set_text_color(0, 0, 0)
-    pdf.ln(2)
 
 
 def _kpi_table(pdf: FPDF, mov: str, label: str, latest: pd.Series):
@@ -307,6 +295,232 @@ def _session_table(pdf: FPDF, adf: pd.DataFrame):
         pdf.ln()
 
 
+# ── PDF-only matplotlib chart helpers ─────────────────────────────────────────
+_LC = "#00A3A3"   # left  (teal)
+_RC = "#005F87"   # right (blue)
+_FC = "#EF4444"   # flag  (red)
+_WC = "#FFB400"   # warn  (amber)
+_GC = "#22C55E"   # ok    (green)
+
+
+def _best_col(df: pd.DataFrame, mov: str, side: str):
+    nm = f"hip_{mov}_{side}_nm_per_kg"
+    n  = f"hip_{mov}_{side}_n_per_kg"
+    if nm in df.columns and df[nm].notna().any():
+        return nm, "Nm/kg"
+    if n in df.columns and df[n].notna().any():
+        return n, "N/kg"
+    return None, None
+
+
+def _latest_snap(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "athlete_id" not in df.columns:
+        return df
+    return df.sort_values("date").groupby("athlete_id", sort=False).last().reset_index()
+
+
+def _pdf_torque_trend(adf: pd.DataFrame, mov: str):
+    col_l, unit = _best_col(adf, mov, "left")
+    col_r, _    = _best_col(adf, mov, "right")
+    if col_l is None:
+        return None
+    fig, ax = plt.subplots(figsize=(9.6, 3.6))
+    ax.set_facecolor("#F9F9F9")
+    fig.patch.set_facecolor("white")
+    data = adf.sort_values("date")
+    v_l = data[["date", col_l]].dropna()
+    if not v_l.empty:
+        ax.plot(v_l["date"], v_l[col_l], color=_LC, marker="o",
+                linewidth=2, markersize=5, label="Left")
+    if col_r:
+        v_r = data[["date", col_r]].dropna()
+        if not v_r.empty:
+            ax.plot(v_r["date"], v_r[col_r], color=_RC, marker="s",
+                    linewidth=2, markersize=5, label="Right")
+    lbl = "Abduction" if mov == "abd" else "Adduction"
+    ax.set_title(f"Hip {lbl} — Torque / BW", fontsize=12, color="#005F87", pad=8)
+    ax.set_xlabel("Date", fontsize=9)
+    ax.set_ylabel(unit, fontsize=9)
+    ax.legend(fontsize=9)
+    ax.tick_params(axis="x", rotation=30, labelsize=8)
+    ax.tick_params(axis="y", labelsize=8)
+    ax.grid(True, alpha=0.3, linestyle="--")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def _pdf_team_by_position(df: pd.DataFrame, mov: str):
+    latest = _latest_snap(df)
+    if "tier" not in latest.columns:
+        return None
+    col_l, unit = _best_col(latest, mov, "left")
+    col_r, _    = _best_col(latest, mov, "right")
+    if col_l is None:
+        return None
+    tier_order = ["Skill", "Mid", "Big"]
+    ml, mr, labels = [], [], []
+    for t in tier_order:
+        sub = latest[latest["tier"] == t]
+        if sub.empty:
+            continue
+        ml.append(float(sub[col_l].dropna().mean()) if sub[col_l].notna().any() else 0)
+        mr.append(float(sub[col_r].dropna().mean()) if col_r and col_r in sub.columns and sub[col_r].notna().any() else 0)
+        labels.append(f"{t}\nn={len(sub)}")
+    if not labels:
+        return None
+    x  = np.arange(len(labels))
+    w  = 0.35
+    lbl = "Abduction" if mov == "abd" else "Adduction"
+    fig, ax = plt.subplots(figsize=(7.0, 3.4))
+    ax.set_facecolor("#F9F9F9")
+    fig.patch.set_facecolor("white")
+    bl = ax.bar(x - w/2, ml, w, color=_LC, alpha=0.85, label="Left")
+    br = ax.bar(x + w/2, mr, w, color=_RC, alpha=0.85, label="Right")
+    for bar in list(bl) + list(br):
+        h = bar.get_height()
+        if h > 0:
+            ax.text(bar.get_x() + bar.get_width() / 2, h + 0.01,
+                    f"{h:.2f}", ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_ylabel(unit, fontsize=9)
+    ax.set_title(f"Hip {lbl} — Mean Torque by Tier", fontsize=12, color="#005F87", pad=8)
+    ax.legend(fontsize=9)
+    ax.grid(True, axis="y", alpha=0.3, linestyle="--")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def _pdf_team_dist(df: pd.DataFrame, mov: str):
+    latest = _latest_snap(df)
+    if "tier" not in latest.columns:
+        return None
+    col_l, unit = _best_col(latest, mov, "left")
+    col_r, _    = _best_col(latest, mov, "right")
+    if col_l is None:
+        return None
+    tier_order = ["Skill", "Mid", "Big"]
+    lbl = "Abduction" if mov == "abd" else "Adduction"
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.4), sharey=False)
+    fig.patch.set_facecolor("white")
+    for ax, col, side, color in [(axes[0], col_l, "Left", _LC),
+                                  (axes[1], col_r, "Right", _RC)]:
+        if col is None or col not in latest.columns:
+            ax.set_visible(False)
+            continue
+        ax.set_facecolor("#F9F9F9")
+        grps  = [latest[latest["tier"] == t][col].dropna().values for t in tier_order
+                 if t in latest["tier"].values]
+        glbls = [t for t in tier_order if t in latest["tier"].values]
+        grps  = [(g, l) for g, l in zip(grps, glbls) if len(g) > 0]
+        if not grps:
+            ax.set_visible(False)
+            continue
+        gdata, glbls2 = zip(*grps)
+        bp = ax.boxplot(list(gdata), patch_artist=True, widths=0.4)
+        for patch in bp["boxes"]:
+            patch.set_facecolor(color)
+            patch.set_alpha(0.6)
+        for elem in ["whiskers", "caps", "medians"]:
+            for line in bp[elem]:
+                line.set_color(color)
+        ax.set_xticklabels(glbls2, fontsize=9)
+        ax.set_title(side, fontsize=10, color="#005F87")
+        ax.set_ylabel(unit, fontsize=8)
+        ax.grid(True, axis="y", alpha=0.3, linestyle="--")
+        ax.spines[["top", "right"]].set_visible(False)
+    fig.suptitle(f"Hip {lbl} — Distribution by Tier", fontsize=12, color="#005F87")
+    fig.tight_layout()
+    return fig
+
+
+def _pdf_asym_rank(df: pd.DataFrame, mov: str,
+                   flag_pct: float = 15.0, warn_pct: float = 10.0):
+    latest = _latest_snap(df)
+    col = f"hip_{mov}_asym_pct"
+    if col not in latest.columns:
+        return None
+    data = (latest[["athlete_name", col]]
+            .dropna(subset=[col])
+            .sort_values(col, ascending=True)
+            .reset_index(drop=True))
+    if data.empty:
+        return None
+    colors = [_FC if v > flag_pct else _WC if v > warn_pct else _LC
+              for v in data[col]]
+    names  = [n[:22] + "…" if len(n) > 22 else n for n in data["athlete_name"]]
+    h      = max(3.0, len(names) * 0.28)
+    lbl    = "Abduction" if mov == "abd" else "Adduction"
+    fig, ax = plt.subplots(figsize=(9.6, h))
+    ax.set_facecolor("#F9F9F9")
+    fig.patch.set_facecolor("white")
+    ax.barh(names, data[col], color=colors, alpha=0.85)
+    ax.axvline(flag_pct, color=_FC, linestyle="--", linewidth=1.2,
+               label=f"{flag_pct:.0f}% flag")
+    ax.axvline(warn_pct, color=_WC, linestyle=":", linewidth=1.0,
+               label=f"{warn_pct:.0f}% warn")
+    ax.set_title(f"Hip {lbl} — Asymmetry Rankings", fontsize=12, color="#005F87", pad=8)
+    ax.set_xlabel("Asymmetry %", fontsize=9)
+    ax.tick_params(labelsize=8)
+    ax.legend(fontsize=8)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(True, axis="x", alpha=0.3, linestyle="--")
+    fig.tight_layout()
+    return fig
+
+
+def _pdf_risk_matrix(df: pd.DataFrame, flag_pct: float = 15.0, warn_pct: float = 10.0):
+    latest   = _latest_snap(df)
+    nm_cols  = []
+    unit     = "N/kg"
+    for _mov in ("abd", "add"):
+        for _side in ("left", "right"):
+            col, u = _best_col(latest, _mov, _side)
+            if col:
+                nm_cols.append(col)
+                unit = u
+    asym_cols = [c for c in ["hip_abd_asym_pct", "hip_add_asym_pct"]
+                 if c in latest.columns]
+    if not nm_cols or not asym_cols:
+        return None
+    data = latest.copy()
+    data["_avg"]  = data[nm_cols].mean(axis=1)
+    data["_asym"] = data[asym_cols].max(axis=1)
+    data = data.dropna(subset=["_avg", "_asym"])
+    if data.empty:
+        return None
+    x_mid  = float(data["_avg"].median())
+    y_top  = max(flag_pct * 1.7, float(data["_asym"].max()) * 1.2)
+    fig, ax = plt.subplots(figsize=(9.0, 4.5))
+    ax.set_facecolor("#F9F9F9")
+    fig.patch.set_facecolor("white")
+    ax.axhspan(flag_pct, y_top, xmin=0, xmax=0.5, color=_FC, alpha=0.07)
+    ax.axhspan(flag_pct, y_top, xmin=0.5, xmax=1.0, color="#FF8C00", alpha=0.05)
+    ax.axvline(x_mid,    color="#999", linestyle=":", linewidth=1, alpha=0.6)
+    ax.axhline(flag_pct, color=_FC, linestyle="--", linewidth=1.2,
+               label=f"{flag_pct:.0f}% flag")
+    ax.axhline(warn_pct, color=_WC, linestyle=":", linewidth=1.0,
+               label=f"{warn_pct:.0f}% warn")
+    tier_clr = {"Skill": _LC, "Mid": _WC, "Big": _RC}
+    for tier, grp in data.groupby("tier"):
+        color  = tier_clr.get(str(tier), "#888888")
+        bw_col = grp.get("bodyweight_kg") if "bodyweight_kg" in grp.columns else None
+        sizes  = ((bw_col.fillna(85).clip(60, 145) - 60) / 85 * 80 + 30
+                  if bw_col is not None else [50] * len(grp))
+        ax.scatter(grp["_avg"], grp["_asym"], s=sizes, c=color, alpha=0.8,
+                   label=str(tier), edgecolors="white", linewidths=0.5)
+    ax.set_xlabel(f"Avg Torque ({unit} BW)", fontsize=9)
+    ax.set_ylabel("Max Asymmetry (%)", fontsize=9)
+    ax.set_title("Risk Matrix — Strength vs Asymmetry", fontsize=12, color="#005F87", pad=8)
+    ax.legend(fontsize=9, title="Tier")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(True, alpha=0.2, linestyle="--")
+    fig.tight_layout()
+    return fig
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 def generate_athlete_pdf(
     athlete_name: str,
@@ -390,10 +604,10 @@ def generate_athlete_pdf(
     pdf.set_text_color(0, 0, 0)
     pdf.ln(1)
 
-    fig_abd = torque_bw_chart(adf, "abd", dark_mode=False)
-    if fig_abd.data:
+    fig_abd = _pdf_torque_trend(adf, "abd")
+    if fig_abd is not None:
         _add_chart(pdf, fig_abd,
-                   "ABD torque / BW (Nm/kg or N/kg). Dotted = linear trend (3+ sessions).")
+                   "ABD torque / BW (Nm/kg or N/kg).")
     else:
         pdf.set_font("Helvetica", "I", 9)
         pdf.set_text_color(*WARM_SLATE)
@@ -407,10 +621,10 @@ def generate_athlete_pdf(
     pdf.set_text_color(0, 0, 0)
     pdf.ln(1)
 
-    fig_add = torque_bw_chart(adf, "add", dark_mode=False)
-    if fig_add.data:
+    fig_add = _pdf_torque_trend(adf, "add")
+    if fig_add is not None:
         _add_chart(pdf, fig_add,
-                   "ADD torque / BW (Nm/kg or N/kg). Dotted = linear trend (3+ sessions).")
+                   "ADD torque / BW (Nm/kg or N/kg).")
     else:
         pdf.set_font("Helvetica", "I", 9)
         pdf.set_text_color(*WARM_SLATE)
@@ -586,24 +800,24 @@ def generate_team_pdf(df: pd.DataFrame) -> bytes:
     pdf.add_page()
     _section_title(pdf, "Torque Output by Position Group")
     for mov, lbl in (("abd", "Hip Abduction"), ("add", "Hip Adduction")):
-        fig = team_torque_by_position(df, mov, dark_mode=False)
-        if fig.data:
+        fig = _pdf_team_by_position(df, mov)
+        if fig is not None:
             _add_chart(pdf, fig, f"{lbl} — mean torque per tier")
 
     # ── Torque distribution ──────────────────────────────────────────────────
     pdf.add_page()
     _section_title(pdf, "Torque Distribution by Tier")
     for mov, lbl in (("abd", "Hip Abduction"), ("add", "Hip Adduction")):
-        fig = team_torque_distribution(df, mov, dark_mode=False)
-        if fig.data:
-            _add_chart(pdf, fig, f"{lbl} — box + strip plot per tier")
+        fig = _pdf_team_dist(df, mov)
+        if fig is not None:
+            _add_chart(pdf, fig, f"{lbl} — box plot per tier")
 
     # ── Asymmetry rankings ───────────────────────────────────────────────────
     pdf.add_page()
     _section_title(pdf, "Asymmetry Rankings")
     for mov, lbl in (("abd", "Hip Abduction"), ("add", "Hip Adduction")):
-        fig = team_asymmetry_rank(df, mov, dark_mode=False)
-        if fig.data:
+        fig = _pdf_asym_rank(df, mov)
+        if fig is not None:
             _add_chart(pdf, fig,
                        f"{lbl} asymmetry index. Red = >15% flag. Amber = 10-15% watch.")
 
@@ -619,8 +833,8 @@ def generate_team_pdf(df: pd.DataFrame) -> bytes:
                    "Top-left quadrant = highest intervention priority.")
     pdf.set_text_color(0, 0, 0)
     pdf.ln(2)
-    fig_risk = team_risk_matrix(df, dark_mode=False)
-    if fig_risk.data:
+    fig_risk = _pdf_risk_matrix(df)
+    if fig_risk is not None:
         _add_chart(pdf, fig_risk)
 
     return bytes(pdf.output())
